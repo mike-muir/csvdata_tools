@@ -122,6 +122,32 @@ class App:
         self._build_canvas(right)
 
     def _build_sidebar(self, p):
+        # --- Pack buttons and options from the BOTTOM up first so they are
+        #     always visible regardless of window height.  The listboxes then
+        #     fill whatever space is left in the middle.
+        tk.Button(p, text="Export to new window", command=self._export,
+                  bg="#388e3c", fg="white").pack(
+            side=tk.BOTTOM, fill=tk.X, padx=4, pady=(0, 8))
+        tk.Button(p, text="Set axis limits…", command=self._limits_dialog).pack(
+            side=tk.BOTTOM, fill=tk.X, padx=4, pady=(0, 2))
+        tk.Button(p, text="Plot", command=self._plot,
+                  bg="#2979ff", fg="white", font=("", 10, "bold")).pack(
+            side=tk.BOTTOM, fill=tk.X, padx=4, pady=(4, 2))
+
+        # options
+        opts = tk.LabelFrame(p, text="Options", padx=6, pady=4)
+        opts.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
+
+        self.var_zero    = tk.BooleanVar(value=True)
+        self.var_sub     = tk.BooleanVar(value=False)
+        self.var_sharex  = tk.BooleanVar(value=True)
+
+        tk.Checkbutton(opts, text="Zeroize time",      variable=self.var_zero).pack(anchor="w")
+        tk.Checkbutton(opts, text="Separate subplots", variable=self.var_sub).pack(anchor="w")
+        tk.Checkbutton(opts, text="Shared X axis",     variable=self.var_sharex).pack(anchor="w")
+
+        # --- Now pack the top-down elements (search + lists) ---
+
         # search
         tk.Label(p, text="Search:").pack(anchor="w", padx=4, pady=(6, 0))
         self.sv_search = tk.StringVar()
@@ -143,7 +169,7 @@ class App:
         # add / clear row
         row = tk.Frame(p)
         row.pack(fill=tk.X, padx=4, pady=2)
-        tk.Button(row, text="Add →",    command=self._add).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Button(row, text="Add →",     command=self._add).pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Button(row, text="Clear all", command=self._clear).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         # selected list
@@ -161,27 +187,6 @@ class App:
 
         tk.Button(p, text="Remove selected", command=self._remove).pack(
             fill=tk.X, padx=4, pady=(2, 4))
-
-        # options
-        opts = tk.LabelFrame(p, text="Options", padx=6, pady=4)
-        opts.pack(fill=tk.X, padx=4, pady=4)
-
-        self.var_zero    = tk.BooleanVar(value=True)
-        self.var_sub     = tk.BooleanVar(value=False)
-        self.var_sharex  = tk.BooleanVar(value=True)
-
-        tk.Checkbutton(opts, text="Zeroize time",      variable=self.var_zero).pack(anchor="w")
-        tk.Checkbutton(opts, text="Separate subplots", variable=self.var_sub).pack(anchor="w")
-        tk.Checkbutton(opts, text="Shared X axis",     variable=self.var_sharex).pack(anchor="w")
-
-        # action buttons
-        tk.Button(p, text="Plot", command=self._plot,
-                  bg="#2979ff", fg="white", font=("", 10, "bold")).pack(
-            fill=tk.X, padx=4, pady=(4, 2))
-        tk.Button(p, text="Set axis limits…", command=self._limits_dialog).pack(
-            fill=tk.X, padx=4, pady=(0, 2))
-        tk.Button(p, text="Export to new window", command=self._export,
-                  bg="#388e3c", fg="white").pack(fill=tk.X, padx=4, pady=(0, 8))
 
     def _build_canvas(self, p):
         self.fig = Figure()
