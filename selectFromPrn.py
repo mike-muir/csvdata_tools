@@ -3,11 +3,94 @@ from tkinter import ttk, filedialog, messagebox
 import fnmatch
 import csv
 import os
+import difflib
+import argparse
+
+DELETE_OPTION = "(delete - no match)"
+
+
+class ReconcileDialog(tk.Toplevel):
+    """Modal dialog to resolve variables that no longer exist in the current PRN."""
+
+    def __init__(self, parent, missing_names, available_names):
+        super().__init__(parent)
+        self.title("Resolve Changed Variables")
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(True, True)
+
+        self.result = None  # dict: old_name -> new_name (str) or None (delete)
+        self._row_vars = []  # list of (old_name, tk.StringVar)
+
+        intro = (
+            f"{len(missing_names)} variable(s) in your list were not found in the "
+            "loaded PRN file. Choose a replacement for each, or delete it."
+        )
+        ttk.Label(self, text=intro, wraplength=560, justify=tk.LEFT, padding=10).pack(fill=tk.X)
+
+        # Scrollable row area
+        container = ttk.Frame(self)
+        container.pack(fill=tk.BOTH, expand=True, padx=10)
+
+        canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0, height=300)
+        scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        rows_frame = ttk.Frame(canvas)
+        rows_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=rows_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        ttk.Label(rows_frame, text="Missing Variable", font=("", 9, "bold")).grid(
+            row=0, column=0, sticky=tk.W, padx=4, pady=4
+        )
+        ttk.Label(rows_frame, text="Replacement", font=("", 9, "bold")).grid(
+            row=0, column=1, sticky=tk.W, padx=4, pady=4
+        )
+
+        for i, name in enumerate(missing_names, start=1):
+            suggestions = difflib.get_close_matches(name, available_names, n=5, cutoff=0.5)
+            values = suggestions + [DELETE_OPTION]
+
+            ttk.Label(rows_frame, text=name).grid(row=i, column=0, sticky=tk.W, padx=4, pady=2)
+
+            var = tk.StringVar(value=values[0] if suggestions else DELETE_OPTION)
+            combo = ttk.Combobox(rows_frame, textvariable=var, values=values, width=40)
+            combo.grid(row=i, column=1, sticky=tk.W, padx=4, pady=2)
+            self._row_vars.append((name, var))
+
+        # Buttons
+        btn_frame = ttk.Frame(self, padding=10)
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="Apply", command=self._on_apply).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn_frame, text="Cancel", command=self._on_cancel).pack(side=tk.RIGHT)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
+
+    def _on_apply(self):
+        decisions = {}
+        for old_name, var in self._row_vars:
+            value = var.get().strip()
+            if not value or value == DELETE_OPTION:
+                decisions[old_name] = None
+            else:
+                decisions[old_name] = value
+        self.result = decisions
+        self.destroy()
+
+    def _on_cancel(self):
+        self.result = None
+        self.destroy()
 
 
 class PrnSelectorApp:
-    def __init__(self, root):
+    def __init__(self, root, result_file=None):
         self.root = root
+        # When set, the path of each saved CSV is written here so a calling
+        # program (iads_export_gui) can pick it up.
+        self.result_file = result_file
         self.root.title("Select Variables from PRN File")
         self.root.geometry("800x600")
         self.root.minsize(600, 400)
@@ -135,6 +218,9 @@ class PrnSelectorApp:
         )
         self._apply_filter()
 
+        if self.selected_variables:
+            self._reconcile_selected(names)
+
     def load_csv(self):
         path = filedialog.askopenfilename(
             title="Open existing CSV",
@@ -155,6 +241,41 @@ class PrnSelectorApp:
         self.remove_all()
         self._add_vars(names)
         self.csv_label.configure(text=os.path.basename(path), foreground="black")
+
+        if self.all_variables:
+            self._reconcile_selected(self.all_variables)
+
+    # ------------------------------------------------------------------ #
+    # Reconciliation
+    # ------------------------------------------------------------------ #
+
+    def _reconcile_selected(self, available_names):
+        available_set = set(available_names)
+        missing = [v for v in self.selected_variables if v not in available_set]
+        if not missing:
+            return
+
+        dialog = ReconcileDialog(self.root, missing, available_names)
+        self.root.wait_window(dialog)
+        decisions = dialog.result
+        if not decisions:
+            return
+
+        new_selected = []
+        for v in self.selected_variables:
+            if v in decisions:
+                replacement = decisions[v]
+                if replacement is not None:
+                    new_selected.append(replacement)
+                # else: dropped (delete)
+            else:
+                new_selected.append(v)
+
+        self.selected_variables = new_selected
+        self.sel_list.delete(0, tk.END)
+        for v in self.selected_variables:
+            self.sel_list.insert(tk.END, v)
+        self._update_counts()
 
     # ------------------------------------------------------------------ #
     # Filter / search
@@ -236,7 +357,17 @@ class PrnSelectorApp:
             messagebox.showerror("Error", f"Could not write file:\n{e}")
             return
 
+        self._report_saved(path)
         messagebox.showinfo("Exported", f"Saved {len(self.selected_variables)} variable(s) to:\n{path}")
+
+    def _report_saved(self, path):
+        if not self.result_file:
+            return
+        try:
+            with open(self.result_file, "w", encoding="utf-8") as f:
+                f.write(os.path.abspath(path))
+        except OSError as e:
+            messagebox.showwarning("Warning", f"Saved CSV, but could not report path:\n{e}")
 
     # ------------------------------------------------------------------ #
     # Helpers
@@ -248,8 +379,12 @@ class PrnSelectorApp:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Select variables from a PRN file.")
+    parser.add_argument("--result-file",
+                        help="write the path of each saved CSV to this file")
+    args = parser.parse_args()
     root = tk.Tk()
-    app = PrnSelectorApp(root)
+    PrnSelectorApp(root, result_file=args.result_file)
     root.mainloop()
 
 

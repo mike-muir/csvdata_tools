@@ -28,52 +28,73 @@ def load_csv(path):
     return df
 
 
-def render(fig, df, time_col, variables, zeroize, subplots, shared_x, right_axis_vars=None):
-    """Returns (ax_primary, ax_right_or_None). ax_primary is the first subplot in subplot mode."""
+def build_groups(variables, one_per_var, subplot_of):
+    """Return a list of variable lists, one per subplot, in ascending subplot-number order."""
+    if one_per_var:
+        return [[v] for v in variables]
+    subplot_of = subplot_of or {}
+    nums = sorted({subplot_of.get(v, 1) for v in variables})
+    return [[v for v in variables if subplot_of.get(v, 1) == n] for n in nums]
+
+
+def render(fig, df, time_col, variables, zeroize, subplots, shared_x,
+           right_axis_vars=None, subplot_of=None):
+    """Returns (ax_primary, ax_right_or_None) for the first subplot.
+
+    subplots=True puts every variable on its own subplot; otherwise variables are
+    grouped by subplot_of (var -> subplot number, default 1).
+    """
     fig.clear()
     right_axis_vars = right_axis_vars or set()
-    vars_left  = [v for v in variables if v not in right_axis_vars]
-    vars_right = [v for v in variables if v in right_axis_vars]
+    prop_cycle = matplotlib.rcParams["axes.prop_cycle"].by_key()["color"]
+    color_of = {v: prop_cycle[i % len(prop_cycle)] for i, v in enumerate(variables)}
 
     t = df[time_col].copy()
     if zeroize:
         first = t.dropna().iloc[0] if not t.dropna().empty else 0
         t = t - first
     xlabel = f"{time_col} (s, zeroed)" if zeroize else time_col
-    n = len(variables)
 
-    if subplots and n > 1:
-        axes = fig.subplots(n, 1, sharex=shared_x)
-        for ax, var in zip(axes, variables):
-            ax.plot(t, df[var])
-            ax.set_ylabel(var, fontsize=8)
-            ax.tick_params(labelsize=7)
-        axes[-1].set_xlabel(xlabel)
-        fig.tight_layout()
-        return axes[0], None
+    groups = build_groups(variables, subplots, subplot_of)
+    multi = len(groups) > 1
+    if multi:
+        axes = list(fig.subplots(len(groups), 1, sharex=shared_x))
     else:
-        prop_cycle = matplotlib.rcParams["axes.prop_cycle"].by_key()["color"]
-        ax = fig.add_subplot(111)
-        for i, var in enumerate(vars_left):
-            ax.plot(t, df[var], label=var, color=prop_cycle[i % len(prop_cycle)])
-        ax.set_xlabel(xlabel)
+        axes = [fig.add_subplot(111)]
+
+    first_ax = first_ax2 = None
+    for gi, (ax, group) in enumerate(zip(axes, groups)):
+        vars_left = [v for v in group if v not in right_axis_vars]
+        vars_right = [v for v in group if v in right_axis_vars]
+        for var in vars_left:
+            ax.plot(t, df[var], label=var, color=color_of[var])
 
         ax2 = None
         if vars_right:
             ax2 = ax.twinx()
-            offset = len(vars_left)
-            for i, var in enumerate(vars_right):
-                ax2.plot(t, df[var], label=var, color=prop_cycle[(offset + i) % len(prop_cycle)],
-                         linestyle="--")
+            for var in vars_right:
+                ax2.plot(t, df[var], label=var, color=color_of[var], linestyle="--")
             ax2.tick_params(labelsize=7)
-            lines1, labels1 = ax.get_legend_handles_labels()
-            lines2, labels2 = ax2.get_legend_handles_labels()
-            ax.legend(lines1 + lines2, labels1 + labels2, fontsize=8)
-        else:
-            ax.legend(fontsize=8)
 
-        fig.tight_layout()
-        return ax, ax2
+        handles, labels = ax.get_legend_handles_labels()
+        if ax2 is not None:
+            h2, l2 = ax2.get_legend_handles_labels()
+            handles, labels = handles + h2, labels + l2
+        if multi:
+            ax.tick_params(labelsize=7)
+            if len(group) == 1:
+                ax.set_ylabel(group[0], fontsize=8)
+            else:
+                ax.legend(handles, labels, fontsize=7)
+        else:
+            ax.legend(handles, labels, fontsize=8)
+
+        if gi == 0:
+            first_ax, first_ax2 = ax, ax2
+
+    axes[-1].set_xlabel(xlabel)
+    fig.tight_layout()
+    return first_ax, first_ax2
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +111,7 @@ class App:
         self.all_vars = []
         self.selected = []
         self.right_axis_vars = set()   # subset of selected on right axis
+        self.subplot_of = {}           # var -> subplot number (default 1)
         self.ax  = None
         self.ax2 = None
 
@@ -143,7 +165,7 @@ class App:
         self.var_sharex  = tk.BooleanVar(value=True)
 
         tk.Checkbutton(opts, text="Zeroize time",      variable=self.var_zero).pack(anchor="w")
-        tk.Checkbutton(opts, text="Separate subplots", variable=self.var_sub).pack(anchor="w")
+        tk.Checkbutton(opts, text="One subplot per variable", variable=self.var_sub).pack(anchor="w")
         tk.Checkbutton(opts, text="Shared X axis",     variable=self.var_sharex).pack(anchor="w")
 
         # --- Now pack the top-down elements (search + lists) ---
@@ -185,6 +207,16 @@ class App:
         self.lb_sel.bind("<Double-Button-1>", lambda _: self._remove())
         self.lb_sel.bind("<Button-3>", self._sel_context_menu)
 
+        sub_row = tk.Frame(p)
+        sub_row.pack(fill=tk.X, padx=4, pady=(2, 0))
+        tk.Label(sub_row, text="Subplot #:").pack(side=tk.LEFT)
+        self.sv_subplot = tk.StringVar(value="1")
+        tk.Spinbox(sub_row, from_=1, to=20, width=4, textvariable=self.sv_subplot).pack(
+            side=tk.LEFT, padx=4)
+        tk.Button(sub_row, text="Assign to selected",
+                  command=lambda: self._assign_subplot(self.sv_subplot.get())).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+
         tk.Button(p, text="Remove selected", command=self._remove).pack(
             fill=tk.X, padx=4, pady=(2, 4))
 
@@ -201,6 +233,9 @@ class App:
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")])
         if not path:
             return
+        self.load_path(path)
+
+    def load_path(self, path):
         try:
             self.df = load_csv(path)
         except Exception as e:
@@ -210,6 +245,7 @@ class App:
         self.all_vars = list(self.df.columns[1:])
         self.selected = []
         self.right_axis_vars = set()
+        self.subplot_of = {}
         self.lbl_file.config(text=path, fg="black")
         self._filter()
         self._refresh_sel()
@@ -224,7 +260,9 @@ class App:
     def _refresh_sel(self):
         self.lb_sel.delete(0, tk.END)
         for v in self.selected:
-            label = f"{v}  [R]" if v in self.right_axis_vars else v
+            label = f"{v}  [P{self.subplot_of.get(v, 1)}]"
+            if v in self.right_axis_vars:
+                label += "  [R]"
             self.lb_sel.insert(tk.END, label)
 
     def _add(self):
@@ -240,12 +278,34 @@ class App:
         removed = {v for i, v in enumerate(self.selected) if i in drop_indices}
         self.selected = kept
         self.right_axis_vars -= removed
+        for v in removed:
+            self.subplot_of.pop(v, None)
         self._refresh_sel()
 
     def _clear(self):
         self.selected = []
         self.right_axis_vars = set()
+        self.subplot_of = {}
         self._refresh_sel()
+
+    def _assign_subplot(self, num):
+        try:
+            num = int(num)
+        except ValueError:
+            messagebox.showerror("Invalid subplot", "Subplot number must be an integer.")
+            return
+        if num < 1:
+            messagebox.showerror("Invalid subplot", "Subplot number must be 1 or greater.")
+            return
+        idxs = self.lb_sel.curselection()
+        if not idxs:
+            messagebox.showwarning("Nothing selected", "Select variables in the Selected list first.")
+            return
+        for i in idxs:
+            self.subplot_of[self.selected[i]] = num
+        self._refresh_sel()
+        for i in idxs:
+            self.lb_sel.selection_set(i)
 
     def _sel_context_menu(self, event):
         # Select the item under the cursor if not already selected
@@ -264,6 +324,13 @@ class App:
         else:
             menu.add_command(label="Move to right axis",
                              command=lambda: self._set_axis(idx, right=True))
+        sub_menu = tk.Menu(menu, tearoff=0)
+        top = max([self.subplot_of.get(v, 1) for v in self.selected] + [1])
+        for n in range(1, top + 2):
+            suffix = " (new)" if n == top + 1 else ""
+            sub_menu.add_command(label=f"Subplot {n}{suffix}",
+                                 command=lambda n=n: self._assign_subplot(n))
+        menu.add_cascade(label="Move to subplot", menu=sub_menu)
         menu.tk_popup(event.x_root, event.y_root)
 
     def _set_axis(self, idx, right):
@@ -349,7 +416,8 @@ class App:
         try:
             self.ax, self.ax2 = render(self.fig, self.df, self.time_col, self.selected,
                                        self.var_zero.get(), self.var_sub.get(),
-                                       self.var_sharex.get(), self.right_axis_vars)
+                                       self.var_sharex.get(), self.right_axis_vars,
+                                       self.subplot_of)
             self.canvas.draw()
         except Exception as e:
             messagebox.showerror("Plot error", str(e))
@@ -366,7 +434,7 @@ class App:
         NavigationToolbar2Tk(canvas, win).update()
         render(fig, self.df, self.time_col, self.selected,
                self.var_zero.get(), self.var_sub.get(), self.var_sharex.get(),
-               self.right_axis_vars)
+               self.right_axis_vars, self.subplot_of)
         canvas.draw()
 
 
@@ -374,5 +442,7 @@ class App:
 
 if __name__ == "__main__":
     root = tk.Tk()
-    App(root)
+    app = App(root)
+    if len(sys.argv) > 1:
+        app.load_path(sys.argv[1])
     root.mainloop()
