@@ -1,4 +1,8 @@
+import argparse
+import queue
+import socket
 import sys
+import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -243,12 +247,73 @@ class App:
             return
         self.time_col = self.df.columns[0]
         self.all_vars = list(self.df.columns[1:])
-        self.selected = []
-        self.right_axis_vars = set()
-        self.subplot_of = {}
+
+        # Keep the current selection (and its axis / subplot settings) for any
+        # variables that also exist in the new file.
+        available = set(self.all_vars)
+        missing = [v for v in self.selected if v not in available]
+        if missing:
+            self.selected = [v for v in self.selected if v in available]
+            self.right_axis_vars -= set(missing)
+            for v in missing:
+                self.subplot_of.pop(v, None)
+
         self.lbl_file.config(text=path, fg="black")
         self._filter()
         self._refresh_sel()
+
+        if missing:
+            messagebox.showwarning(
+                "Variables not found",
+                f"{len(missing)} selected variable(s) are not in this file and were removed:\n\n"
+                + "\n".join(missing[:20]) + ("\n..." if len(missing) > 20 else ""))
+        # Refresh the plot with the new data if one was already drawn.
+        if self.ax is not None and self.selected:
+            self._plot()
+
+    # ------------------------------------------------------- single instance --
+
+    def start_listener(self, port):
+        """Accept file paths on a local socket so another program can reuse this window."""
+        self._inbox = queue.Queue()
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.bind(("127.0.0.1", port))
+            srv.listen(5)
+        except OSError as e:
+            print(f"Could not listen on port {port}: {e}", file=sys.stderr)
+            return
+
+        def serve():
+            while True:
+                conn, _ = srv.accept()
+                with conn:
+                    conn.settimeout(2)
+                    try:
+                        path = conn.makefile("r", encoding="utf-8").readline().strip()
+                    except OSError:
+                        continue
+                    if path:
+                        self._inbox.put(path)
+
+        threading.Thread(target=serve, daemon=True).start()
+        self._poll_inbox()
+
+    def _poll_inbox(self):
+        try:
+            while True:
+                self.load_path(self._inbox.get_nowait())
+                self._raise_window()
+        except queue.Empty:
+            pass
+        self.root.after(200, self._poll_inbox)
+
+    def _raise_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+        self.root.after_idle(self.root.attributes, "-topmost", False)
+        self.root.focus_force()
 
     def _filter(self):
         q = self.sv_search.get().lower()
@@ -442,7 +507,14 @@ class App:
 
 if __name__ == "__main__":
     root = tk.Tk()
+    parser = argparse.ArgumentParser(description="Plot variables from a CSV file.")
+    parser.add_argument("csv", nargs="?", help="CSV file to open")
+    parser.add_argument("--listen-port", type=int,
+                        help="listen on this local port for more files to load into this window")
+    args = parser.parse_args()
     app = App(root)
-    if len(sys.argv) > 1:
-        app.load_path(sys.argv[1])
+    if args.csv:
+        app.load_path(args.csv)
+    if args.listen_port:
+        app.start_listener(args.listen_port)
     root.mainloop()

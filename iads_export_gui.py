@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -341,6 +342,8 @@ class App:
             "yaml", os.path.join(self.repo_var.get(), "config", "manual_export_gui.yaml")))
         self.log_queue = queue.Queue()
         self.running = False
+        self.plot_proc = None   # running plotcsv process, if any
+        self.plot_port = None
         self.exports = []
 
         self._build_ui()
@@ -569,7 +572,28 @@ class App:
         path = files[0] if len(files) == 1 else self._choose_file(files)
         if not path:
             return
-        subprocess.Popen([sys.executable, PLOT_SCRIPT, path], cwd=os.path.dirname(PLOT_SCRIPT))
+        # Reuse the plot window if one is still open; otherwise start a new one.
+        if self.plot_proc is not None and self.plot_proc.poll() is None:
+            if self._send_to_plot(path):
+                return
+        self.plot_port = self._free_port()
+        self.plot_proc = subprocess.Popen(
+            [sys.executable, PLOT_SCRIPT, path, "--listen-port", str(self.plot_port)],
+            cwd=os.path.dirname(PLOT_SCRIPT))
+
+    @staticmethod
+    def _free_port():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    def _send_to_plot(self, path):
+        try:
+            with socket.create_connection(("127.0.0.1", self.plot_port), timeout=2) as conn:
+                conn.sendall((path + "\n").encode("utf-8"))
+            return True
+        except OSError:
+            return False
 
     def _choose_file(self, files):
         dlg = tk.Toplevel(self.root)
